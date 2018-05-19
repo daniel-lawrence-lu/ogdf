@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 
 #include <ogdf/fileformats/SvgPrinter.h>
 #include <ogdf/basic/Queue.h>
@@ -247,8 +248,10 @@ void SvgPrinter::drawNode(pugi::xml_node xmlNode, node v)
 		shape.append_attribute("height") = m_attr.height(v);
 
 		if (m_attr.shape(v) == Shape::RoundedRect) {
-			shape.append_attribute("rx") = m_attr.width(v) / 10;
-			shape.append_attribute("ry") = m_attr.height(v) / 10;
+			const double radius = std::min(
+				std::max(m_attr.width(v) / 10, m_attr.height(v) / 10),
+				std::min(m_attr.width(v) / 2, m_attr.height(v) / 2));
+			shape.append_attribute("rx") = radius;
 		}
 	}
 
@@ -267,15 +270,50 @@ void SvgPrinter::drawNode(pugi::xml_node xmlNode, node v)
 	}
 
 	if (m_attr.has(GraphAttributes::nodeLabel)) {
-		pugi::xml_node label = xmlNode.append_child("text");
-		label.append_attribute("x") = m_attr.x(v);
-		label.append_attribute("y") = m_attr.y(v);
+		pugi::xml_node labelGroup = xmlNode.append_child("g");
+		{
+			std::stringstream ss;
+			ss << "translate(" << x << "," << y << ")";
+			labelGroup.append_attribute("transform") = ss.str().c_str();
+		}
+		pugi::xml_node label = labelGroup.append_child("text");
+		label.append_attribute("x") = "0";
 		label.append_attribute("text-anchor") = "middle";
 		label.append_attribute("dominant-baseline") = "middle";
 		label.append_attribute("font-family") = m_settings.fontFamily().c_str();
 		label.append_attribute("font-size") = m_settings.fontSize();
 		label.append_attribute("fill") = m_settings.fontColor().c_str();
-		label.text() = m_attr.label(v).c_str();
+
+		// to render line breaks ('\n'), we use multiple <tspan> elements
+		// using the following strategy:
+		// https://stackoverflow.com/a/16701952/1012542
+		int n_lines = 1;
+		auto addLine = [&label, &n_lines](const std::string &s) {
+			pugi::xml_node line = label.append_child("tspan");
+			line.append_attribute("x") = "0";
+			line.append_attribute("dy") = "1.2em";
+			line.text() = s.c_str();
+			n_lines++;
+		};
+		std::string tmp;
+		tmp.reserve(m_attr.label(v).size());
+		for (char c : m_attr.label(v)) {
+			if (c == '\n') {
+				addLine(tmp);
+				tmp.clear();
+			} else {
+				tmp += c;
+			}
+		}
+		if (!tmp.empty()) 
+			addLine(tmp);
+
+		// add a vertical offset so that the node label is vertically centered
+		{
+			std::stringstream ss;
+			ss << std::fixed << std::setprecision(1) << -(6 * n_lines) / 10.0 << "em";
+			label.append_attribute("y") = ss.str().c_str();
+		}
 
 		if(m_attr.has(GraphAttributes::nodeLabelPosition)) {
 			label.attribute("x") = m_attr.x(v) + m_attr.xLabel(v);
@@ -293,14 +331,36 @@ void SvgPrinter::drawCluster(pugi::xml_node xmlNode, cluster c)
 	if (c == m_clsAttr->constClusterGraph().rootCluster()) {
 		cluster = xmlNode;
 	} else {
-		pugi::xml_node clusterXmlNode = xmlNode.append_child("rect");
-		clusterXmlNode.append_attribute("x") = m_clsAttr->x(c);
-		clusterXmlNode.append_attribute("y") = m_clsAttr->y(c);
-		clusterXmlNode.append_attribute("width") = m_clsAttr->width(c);
-		clusterXmlNode.append_attribute("height") = m_clsAttr->height(c);
-		clusterXmlNode.append_attribute("fill") = m_clsAttr->fillPattern(c) == FillPattern::None ? "none" : m_clsAttr->fillColor(c).toString().c_str();
-		clusterXmlNode.append_attribute("stroke") = m_clsAttr->strokeType(c) == StrokeType::None ? "none" : m_clsAttr->strokeColor(c).toString().c_str();
-		clusterXmlNode.append_attribute("stroke-width") = (to_string(m_clsAttr->strokeWidth(c)) + "px").c_str();
+		pugi::xml_node clusterXmlNode = xmlNode.append_child("g");
+		{
+			std::stringstream ss;
+			ss << "translate(" << m_clsAttr->x(c) << "," << m_clsAttr->y(c) << ")";
+			clusterXmlNode.append_attribute("transform") = ss.str().c_str();
+		}
+		pugi::xml_node clusterBackground = clusterXmlNode.append_child("rect");
+		clusterBackground.append_attribute("x") = "0";
+		clusterBackground.append_attribute("y") = "0";
+		clusterBackground.append_attribute("width") = m_clsAttr->width(c);
+		clusterBackground.append_attribute("height") = m_clsAttr->height(c);
+		clusterBackground.append_attribute("fill") = m_clsAttr->fillPattern(c) == FillPattern::None ? "none" : m_clsAttr->fillColor(c).toString().c_str();
+		clusterBackground.append_attribute("stroke") = m_clsAttr->strokeType(c) == StrokeType::None ? "none" : m_clsAttr->strokeColor(c).toString().c_str();
+		clusterBackground.append_attribute("stroke-width") = (to_string(m_clsAttr->strokeWidth(c)) + "px").c_str();
+
+		// xmlNode = xmlNode.append_child("g");
+		bool drawLabel = true;// m_clsAttr.has(GraphAttributes::clusterLabel) && !m_clsAttr.label(c).empty();
+
+		if(drawLabel) {
+			pugi::xml_node label;
+			label = clusterXmlNode.append_child("text");
+			label.append_attribute("x") = m_clsAttr->width(c) / 2;
+			label.append_attribute("y") = "10px";
+			label.append_attribute("text-anchor") = "middle";
+			label.append_attribute("dominant-baseline") = "middle";
+			label.append_attribute("font-family") = m_settings.fontFamily().c_str();
+			label.append_attribute("font-size") = m_settings.fontSize();
+			label.append_attribute("fill") = m_settings.fontColor().c_str();
+			label.text() = m_clsAttr->label(c).c_str();
+		}
 	}
 }
 
